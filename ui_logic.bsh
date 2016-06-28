@@ -1,0 +1,1446 @@
+import android.util.Log;
+
+Object dialog;         // Used to help coordinate the display of a "busy..." dialog
+String parentTabgroup; // Used to allow entities to be saved as children
+
+setFileSyncEnabled(true);
+setSyncDelay(5.0f);
+setSyncEnabled(true);
+setSyncMaxInterval(600.0f);
+setSyncMinInterval(5.0f);
+
+
+makeLocalID(){
+  fetchOne("CREATE TABLE IF NOT EXISTS localSettings (key text primary key, value text);", null);
+  fetchOne("DROP VIEW IF EXISTS parentchild;", null);
+  fetchOne("CREATE VIEW parentchild AS "+
+           "SELECT parent.uuid as parentuuid, child.uuid as childuuid, parent.participatesverb as parentparticipatesverb, parent.relationshipid, parent.aenttypename as parentaenttypename, child.participatesverb as childparticipatesverb, child.aenttypename as childaenttypename "+
+           "  FROM (SELECT uuid, participatesverb, aenttypename, relationshipid"+
+           "          FROM latestnondeletedaentreln "+
+           "          JOIN relationship USING (relationshipid) "+
+           "          JOIN latestnondeletedarchent USING (uuid) "+
+           "          JOIN aenttype USING (aenttypeid)) parent "+
+           "  JOIN (SELECT uuid, relationshipid, participatesverb, aenttypename "+
+           "          FROM latestnondeletedaentreln "+
+           "          JOIN relationship USING (relationshipid) "+
+           "          JOIN latestnondeletedarchent USING (uuid) "+
+           "          JOIN aenttype USING (aenttypeid)) child "+
+           "    ON (parent.relationshipid = child.relationshipid AND parent.uuid != child.uuid);", null);
+}
+makeLocalID();
+
+newTab(String tab, Boolean resolveTabGroups) {
+  if (!resolveTabGroups) {
+    return newTab(tab);
+  }
+
+  tab = tab.replaceAll("/$", "");
+  tab = tab.replaceAll("^/", "");
+  if (tab.matches("/")) {
+    newTab(tab);
+  } else {
+    newTabGroup(tab);
+  }
+}
+
+/******************************************************************************/
+/*                                 ACTION BAR                                 */
+/******************************************************************************/
+addActionBarItem("clean_synced_files", new ActionButtonCallback() {
+  actionOnLabel() {
+    "{Clean_Synced_Files}";
+  }
+  actionOn() {
+    cleanSyncedFiles();
+  }
+});
+
+addActionBarItem("sync", new ToggleActionButtonCallback() {
+  actionOnLabel() {
+    "{Disable_Sync}";
+  }
+  actionOn() {
+    setSyncEnabled(false);
+    setFileSyncEnabled(false);
+    showToast("{Sync_Disabled}");
+  }
+  isActionOff() {
+    isSyncEnabled();
+  }
+  actionOffLabel() {
+    "{Enable_Sync}";
+  }
+  actionOff() {
+    setSyncEnabled(true);
+    setFileSyncEnabled(true);
+    showToast("{Sync_Enabled}");
+  }
+});
+
+addActionBarItem("internal_gps", new ToggleActionButtonCallback() {
+  actionOnLabel() {
+    "{Disable_Internal_GPS}";
+  }
+  actionOn() {
+    stopGPS();
+    showToast("{Internal_GPS_Disabled}");
+    updateGPSDiagnostics();
+  }
+  isActionOff() {
+    isInternalGPSOn();
+  }
+  actionOffLabel() {
+    "{Enable_Internal_GPS}";
+  }
+  actionOff() {
+    if(isExternalGPSOn()) {
+      stopGPS();
+    }
+    startInternalGPS();
+    showToast("{Internal_GPS_Enabled}");
+    updateGPSDiagnostics();
+  }
+});
+
+addActionBarItem("external_gps", new ToggleActionButtonCallback() {
+  actionOnLabel() {
+    "{Disable_External_GPS}";
+  }
+  actionOn() {
+    stopGPS();
+    if (isBluetoothConnected()) {
+      showToast("{External_GPS_Disabled}");
+    } else {
+      showToast("{Please_Enable_Bluetooth}");
+    }
+    updateGPSDiagnostics();
+  }
+  isActionOff() {
+    isExternalGPSOn();
+  }
+  actionOffLabel() {
+    "{Enable_External_GPS}";
+  }
+  actionOff() {
+    if(isInternalGPSOn()) {
+      stopGPS();
+    }
+    startExternalGPS();
+    if(isBluetoothConnected()) {
+      showToast("{External_GPS_Enabled}");
+    } else {
+      showToast("{Please_Enable_Bluetooth}");
+      this.actionOn();
+    }
+    updateGPSDiagnostics();
+  }
+});
+
+
+/******************************************************************************/
+/*                                    GPS                                     */
+/******************************************************************************/
+onEvent("Control/Main", "show", "updateGPSDiagnostics()");
+
+updateGPSDiagnostics() {
+  String diagnosticsRef = "Control/Main/GPS_Diagnostics";
+  if (diagnosticsRef.equals("")) {
+    return;
+  }
+
+  String status         = "";
+  String previousStatus = getFieldValue(diagnosticsRef);
+  String notInitialised = "{GPS_is_not_initialised}";
+
+  // Check if GPS is initialised or was previously initialised.
+  if (!isExternalGPSOn() && !isInternalGPSOn()) {
+    if (!isNull(previousStatus) && !previousStatus.equals(notInitialised)) { // previous gps status is some last valid coordinate.
+      // This is hackish. Arch16n substitution happens only at display-time, but the following if clause requires substitution to have happened at run-time
+      String error = "";
+      error = "{GPS_is_no_longer_initialised}. {Previous_status}:";
+      setFieldValue(diagnosticsRef, error);   // Arch16n entry is substituted after this
+      error = getFieldValue(diagnosticsRef);
+
+      // check that error message wasn't previously appended to the previous status message.
+      if (previousStatus.length()    >= error.length() &&
+          previousStatus.subSequence(0, error.length()).equals(error)) {
+        status = previousStatus;
+      } else {
+        status = error + "\n" + previousStatus;
+      }
+    } else {
+      status = notInitialised;
+    }
+  } else {
+    status += "{Internal_GPS}: ";
+    if (isInternalGPSOn())
+    {
+      status += "{on}";
+    } else {
+      status += "{off}";
+    }
+    status += "\nExternal GPS: ";
+    if (isExternalGPSOn())
+    {
+      if (isBluetoothConnected()) {
+        status += "{on_and_bluetooth_connected}";
+      } else {
+        status += "{on_and_bluetooth_disconnected}";
+      }
+    } else {
+      status += "{off}";
+    }
+    Object position = getGPSPosition();
+    if (position != null) {
+      Object projPosition = getGPSPositionProjected();
+      status += "\n{Latitude}: " + position.getLatitude();
+      status += "   {Longitude}: " + position.getLongitude();
+      status += "\n{Northing}: " + projPosition.getLatitude();
+      status += "   {Easting}: " + projPosition.getLongitude();
+      status += "\n{Accuracy}: " + getGPSEstimatedAccuracy();
+    } else {
+      status += "\n{Position}: {no_GPS_position_could_be_found}";
+    }
+  }
+  setFieldValue(diagnosticsRef, status);
+}
+
+/******************************************************************************/
+/*                                 USER LOGIN                                 */
+/******************************************************************************/
+
+String userMenuPath = "User/User/Select_User";
+
+populateListForUsers(){
+  String getNonDeletedUsersQuery = "SELECT userid, fname || ' ' || lname "+
+                                   "  FROM user "+
+                                   " WHERE userdeleted is null;";
+
+  fetchAll(getNonDeletedUsersQuery, new FetchCallback() {
+    onFetch(result) {
+      populateDropDown(userMenuPath, result, true);
+    }
+  });
+}
+
+String username = "";
+
+selectUser () {
+  String userVocabId  = getFieldValue(userMenuPath);
+  String userQ        = "SELECT userid,fname,lname,email FROM user " +
+                        "WHERE  userid='" + userVocabId + "';";
+  FetchCallback callback = new FetchCallback() {
+    onFetch(result) {
+      user = new User(
+            result.get(0),
+            result.get(1),
+            result.get(2),
+            result.get(3)
+      );
+      setUser(user);
+      username = result.get(1) + " " + result.get(2);
+    }
+  };
+
+  fetchOne(userQ, callback);
+}
+
+onEvent(userMenuPath, "show",  "populateListForUsers()");
+onEvent(userMenuPath, "select", "selectUser()");
+
+
+/******************************************************************************/
+/*                              MENU POPULATION                               */
+/******************************************************************************/
+/** Wrapper for to make a vocab without an exlusion list **/
+makeVocab(String type, String path, String attrib) {
+  makeVocab(type, path, attrib, null);
+}
+
+/** Vocab Population **/
+/* Populates the path specified vocabulary from the database based on the given attribute name, where type 
+is the type of the vocab to populate (PictureGallery, HierarchicalPictureGallery, CheckBoxGroup, DropDown, HierarchicalDropDown, RadioGroup or List). */
+makeVocab(String type, String path, String attrib, List vocabExclusions) {
+    makeVocab(type, path, attrib, vocabExclusions, null);
+}
+
+/* Populates the path specified vocabulary from the database based on the given attribute name, where type 
+is the type of the vocab to populate (PictureGallery, HierarchicalPictureGallery, CheckBoxGroup, DropDown, HierarchicalDropDown, RadioGroup or List). */
+makeVocab(String type, String path, String attrib, List vocabExclusions, String callbackFunction){
+  if (isNull(type) || isNull(path) || isNull(attrib)) {
+    Log.e("makeVocab()", "Can't make populate a vocab when the given type, path or attribute is Null");
+    return;
+  }
+
+  if (type.equals("PictureGallery")) {
+    String pictureGalleryQuery = "SELECT vocabid, vocabname, pictureurl "+
+                                 "  FROM vocabulary "+
+                                 "  LEFT OUTER JOIN attributekey USING (attributeid) "+
+                                 " WHERE attributename = '" + attrib + "' "+
+                                 " ORDER BY  vocabcountorder;";
+    fetchAll(pictureGalleryQuery, new FetchCallback() {
+      onFetch(pictures) {
+        populatePictureGallery(path, pictures);
+        if (callbackFunction != null && !isNull(callbackFunction)) {
+          execute(callbackFunction);
+        }
+      }
+    });
+    return;
+  }
+
+  if (type.equals("HierarchicalPictureGallery")) {
+    populateHierarchicalPictureGallery(path, attrib);
+    if (callbackFunction != null && !isNull(callbackFunction)) {
+      execute(callbackFunction);
+    }
+    return;
+  }
+
+  if (type.equals("HierarchicalDropDown")) {
+    // populateHierarchicalDropDown(path, attrib);
+    populateHierarchicalDropDown(path, attrib, true);
+    if (callbackFunction != null && !isNull(callbackFunction)) {
+      execute(callbackFunction);
+    }
+    return;
+  }
+
+  String getAttributeVocabQuery = "SELECT vocabid, vocabname "+
+                                  "  FROM vocabulary "+
+                                  "  JOIN attributekey USING (attributeid) "+
+                                  " WHERE attributename = '" + attrib + "' "+
+                                  " ORDER BY vocabcountorder;";
+  fetchAll(getAttributeVocabQuery,
+    new FetchCallback() {
+      onFetch(result) {
+        // print("makeVocab() result: " + result);
+        if (result!=null && result.size()>0 && vocabExclusions!=null && vocabExclusions.size()>0) {
+          List filteredVocab = new ArrayList();
+          for(item : result) {
+            if (vocabExclusions.contains(item.get(1))) {
+              Log.d("makeVocab()", "removing vocab exclusion: " + item.get(1));
+            } else {
+              filteredVocab.add(item);
+            }
+          }
+          result=filteredVocab;
+        }
+        // print("makeVocab() filtered result: " + result);
+        if(type.equals("CheckBoxGroup")) {
+          populateCheckBoxGroup(path, result);
+        } else if(type.equals("DropDown")) {
+          // populateDropDown(path, result);
+          populateDropDown(path, result, true);
+        } else if(type.equals("RadioGroup")) {
+          populateRadioGroup(path, result);
+        } else if(type.equals("List")) {
+          populateList(path, result);
+        }
+        if (callbackFunction != null && !isNull(callbackFunction)) {
+          execute(callbackFunction);
+        }
+      }
+    });
+}
+makeVocab("DropDown", "Epigraphic_record/Geography/Archaeological_Context", "Archaeological Context");
+makeVocab("RadioGroup", "Epigraphic_record/Geography/Reuse", "Reuse");
+makeVocab("DropDown", "Epigraphic_record/Geography/Location_Accessibility", "Location Accessibility");
+makeVocab("DropDown", "Epigraphic_record/Geography/Inscription_Accessibility", "Inscription Accessibility");
+makeVocab("DropDown", "Epigraphic_record/Geography/Light_conditions", "Light conditions");
+makeVocab("DropDown", "Epigraphic_record/Object/Material", "Material");
+makeVocab("DropDown", "Epigraphic_record/Object/Stone", "Stone");
+makeVocab("DropDown", "Epigraphic_record/Object/Metal", "Metal");
+makeVocab("DropDown", "Epigraphic_record/Object/Colour", "Colour");
+makeVocab("DropDown", "Epigraphic_record/Object/Object_Type", "Object Type");
+makeVocab("DropDown", "Epigraphic_record/Object/Stele_Type", "Stele Type");
+makeVocab("DropDown", "Epigraphic_record/Object/Vessel_Type", "Vessel Type");
+makeVocab("DropDown", "Epigraphic_record/Object/Architecture_Type", "Architecture Type");
+makeVocab("RadioGroup", "Epigraphic_record/Object/Sculpure_Type", "Sculpure Type");
+makeVocab("DropDown", "Epigraphic_record/Object/Personalia_Type", "Personalia Type");
+makeVocab("PictureGallery", "Epigraphic_record/Object/Preservation", "Preservation");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Decoration_Technique", "Decoration Technique");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Decoration_Type", "Decoration Type");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Architectural_Decor_Type", "Architectural Decor Type");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Figural_Decor_Type", "Figural Decor Type");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Anthropomorphic_Figure", "Anthropomorphic Figure");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Animal_Figure", "Animal Figure");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Decoration/Inanimate_Figure", "Inanimate Figure");
+makeVocab("RadioGroup", "Epigraphic_record/Decoration/Size_Decor", "Size Decor");
+makeVocab("RadioGroup", "Epigraphic_record/Lettering/State_of_Wear", "State of Wear");
+makeVocab("DropDown", "Epigraphic_record/Lettering/Script_Type", "Script Type");
+makeVocab("DropDown", "Epigraphic_record/Lettering/Layout", "Layout");
+makeVocab("DropDown", "Epigraphic_record/Interpretation/Date", "Date");
+makeVocab("CheckBoxGroup", "Epigraphic_record/Interpretation/Language_Type", "Language Type");
+makeVocab("RadioGroup", "Epigraphic_record/Interpretation/Language_Form", "Language Form");
+makeVocab("DropDown", "Epigraphic_record/Interpretation/Inscription_Typology", "Inscription Typology");
+makeVocab("DropDown", "Epigraphic_record/Interpretation/Private_Typology", "Private Typology");
+makeVocab("DropDown", "Epigraphic_record/Interpretation/Official_Typology", "Official Typology");
+makeVocab("DropDown", "External_Records/External_Record/External_File_Type", "External File Type");
+
+
+/******************************************************************************/
+/*                                 VALIDATION                                 */
+/******************************************************************************/
+/* `ref`  is a reference/path to a field
+ * `name` is a human-readable name for that field
+ * `cond` is a String containing a boolean expression that evaluates to true if
+ *        and only if the the field pair returned by this function should be
+ *        validated.
+ *
+ *  Returns a field pair (really just an ArrayList).
+ */
+fieldPair(String ref, String name, String cond) {
+  List fp = new ArrayList();
+  fp.add(ref);
+  fp.add(name);
+  fp.add(cond);
+  return fp;
+}
+
+fieldPair(String ref, String name) {
+  String t = "true";
+  return fieldPair(ref, name, t);
+}
+
+/* Returns true if field specified by `ref` is valid. False otherwise.
+ */
+isValidField(String ref) {
+  return !isNull(getFieldValue(ref));
+}
+/* `format` can either be HTML or PLAINTEXT
+ */
+validateFields(List fields, String format) {
+  Integer numInvalid = 0;
+
+  /* Build validation message string (and count how many invalid fields exist) */
+  String out = "Please fill out the following fields:\n";
+  for(f : fields) {
+    String ref  = f.get(0); // Reference to field
+    String name = f.get(1); // Human-readable name
+    String cond = f.get(2); // Validation condition
+
+    // Only validate a field whose validation condition evaluates to `true`
+    Boolean doValidateField = (Boolean) eval(cond);
+    if (!doValidateField)
+      continue;
+
+    // Add any invalid fields to the output and tally them
+    if (!isValidField(ref)) {
+      out += "- " + name + "\n";
+      numInvalid++;
+    }
+  }
+  // All the fields are valid; just overwrite `out` with a cheery message
+  if (numInvalid == 0)
+    out = "All fields contain valid data!";
+
+  /* Format the output as dictated by `format` */
+  if (format == "HTML") {
+    out = out.replace("\n", "<br>");
+  } else if (format == "PLAINTEXT") {
+    ;
+  }
+
+  return out;
+}
+
+validateEpigraphicrecord() {
+  List f = new ArrayList(); // Fields to be validated
+
+  f.add(fieldPair("Epigraphic_record/Admin/Inscription_ID", "{Inscription_ID}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Modern_name", "{Modern_name}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Archaeological_Context", "{Archaeological_Context}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Reuse", "{Reuse}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Location_Accessibility", "{Location_Accessibility}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Inscription_Accessibility", "{Inscription_Accessibility}"));
+  f.add(fieldPair("Epigraphic_record/Geography/Light_conditions", "{Light_conditions}"));
+  f.add(fieldPair("Epigraphic_record/Object/Material", "{Material}"));
+  f.add(fieldPair("Epigraphic_record/Object/Number_fragments", "{Number_fragments}"));
+  f.add(fieldPair("Epigraphic_record/Object/Preservation", "{Preservation}"));
+  f.add(fieldPair("Epigraphic_record/Interpretation/Inscription_Typology", "{Inscription_Typology}"));
+
+  String validationMessage = validateFields(f, "PLAINTEXT");
+  showWarning("Validation Results", validationMessage);
+}validateExternalRecords() {
+  List f = new ArrayList(); // Fields to be validated
+
+  f.add(fieldPair("External_Records/External_Record/External_File_Type", "{External_File_Type}"));
+
+  String validationMessage = validateFields(f, "PLAINTEXT");
+  showWarning("Validation Results", validationMessage);
+}
+
+/******************************************************************************/
+/*                                 AUTOSAVING                                 */
+/******************************************************************************/
+Map tabgroupToUuid = new HashMap();
+
+getUuid(String tabgroup) {
+  tabgroupToUuid.get(tabgroup);
+}
+
+setUuid(String tabgroup, String uuid) {
+  tabgroupToUuid.put(tabgroup, uuid);
+}
+
+saveTabGroup(String tabgroup) {
+  saveTabGroup(tabgroup, "");
+}
+
+saveTabGroup(String tabgroup, String callback) {
+  Boolean enableAutosave  = true;
+  String  id              = getUuid(tabgroup);
+  List    geometry        = null;
+  List    attributes      = null;
+  String  parentTabgroup_ = parentTabgroup;
+
+  parentTabgroup = null;
+  SaveCallback saveCallback  = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+      if (newRecord && !isNull(parentTabgroup_)) {
+        String rel = "";
+        rel += parentTabgroup_.replaceAll("_", " ");
+        rel += " - ";
+        rel += tabgroup.replaceAll("_", " ");
+        saveEntitiesToHierRel(
+          rel,
+          getUuid(parentTabgroup_),
+          uuid,
+          "Parent Of",
+          "Child Of",
+          null
+        );
+      }
+      execute(callback);
+    }
+    onError(message) {
+      showToast(message);
+    }
+  };
+
+  populateAuthorAndTimestamp(tabgroup);
+  saveTabGroup(tabgroup, id, geometry, attributes, saveCallback, enableAutosave);
+}
+
+populateAuthorAndTimestamp(String tabgroup) {
+  Map tabgroupToAuthor    = new HashMap();
+  Map tabgroupToTimestamp = new HashMap();
+  tabgroupToAuthor.put("Diary", "Diary/Fieldwork_Diary/Author");
+  tabgroupToAuthor.put("Epigraphic_record", "Epigraphic_record/Admin/Author");
+  tabgroupToTimestamp.put("Diary", "Diary/Fieldwork_Diary/Timestamp");
+  tabgroupToTimestamp.put("Epigraphic_record", "Epigraphic_record/Admin/Timestamp");
+
+  String uuid          = getUuid(tabgroup);
+  String authorPath    = tabgroupToAuthor.get(tabgroup);
+  String timestampPath = tabgroupToTimestamp.get(tabgroup);
+  if (isNull(uuid)) {
+    if (!isNull(authorPath))
+      setFieldValue(authorPath,    "Entity not yet saved");
+    if (!isNull(timestampPath))
+      setFieldValue(timestampPath, "Entity not yet saved");
+    return;
+  }
+
+  String q = "SELECT createdat, createdby " +
+             "  FROM createdmodifiedatby " +
+             " WHERE uuid = '" + uuid + "'";
+  FetchCallback callback = new FetchCallback() {
+    onFetch(result) {
+      if (!isNull(timestampPath))
+        setFieldValue(timestampPath, result.get(0));
+      if (!isNull(authorPath))
+        setFieldValue(authorPath,    result.get(1));
+    }
+  };
+
+  fetchOne(q, callback);
+}
+
+onShowUser () {
+  // TODO: Add some things which should happen when this tab group is shown
+  saveTabGroup("User");
+}
+onShowControl () {
+  // TODO: Add some things which should happen when this tab group is shown
+  saveTabGroup("Control");
+}
+onShowDiary () {
+  // TODO: Add some things which should happen when this tab group is shown
+  saveTabGroup("Diary");
+}
+onShowEpigraphicrecord () {
+  // TODO: Add some things which should happen when this tab group is shown
+  saveTabGroup("Epigraphic_record");
+}
+onShowExternalRecords () {
+  // TODO: Add some things which should happen when this tab group is shown
+  saveTabGroup("External_Records");
+}
+
+onEvent("User", "show", "onShowUser()");
+onEvent("Control", "show", "onShowControl()");
+onEvent("Diary", "show", "onShowDiary()");
+onEvent("Epigraphic_record", "show", "onShowEpigraphicrecord()");
+onEvent("External_Records", "show", "onShowExternalRecords()");
+
+onClickUserLogin () {
+  // TODO: Add some things which should happen when this element is clicked
+  newControl();
+}
+onClickControlNewEpigraphicrecord () {
+  // TODO: Add some things which should happen when this element is clicked
+  newEpigraphicrecord();
+}
+onClickControlNewDiary () {
+  // TODO: Add some things which should happen when this element is clicked
+  newDiary();
+}
+onClickEpigraphicrecordAddExternalRecords () {
+  // TODO: Add some things which should happen when this element is clicked
+  String tabgroup = "Epigraphic_record";
+  if (isNull(getUuid(tabgroup))){
+    showToast("{You_must_save_this_tabgroup_first}");
+    return;
+  }
+  parentTabgroup = tabgroup;
+  newExternalRecords();
+}
+
+onEvent("User/User/Login", "click", "onClickUserLogin()");
+onEvent("Control/Main/New_Epigraphic_record", "click", "onClickControlNewEpigraphicrecord()");
+onEvent("Control/Main/New_Diary", "click", "onClickControlNewDiary()");
+onEvent("Epigraphic_record/Decoration/Add_External_Records", "click", "onClickEpigraphicrecordAddExternalRecords()");
+
+
+/******************************************************************************/
+/*                   AUDIO, CAMERA, FILE AND VIDEO BINDINGS                   */
+/******************************************************************************/
+onEvent("Epigraphic_record/Object/Button_Audio_Record", "click", "attachAudioTo(\"Epigraphic_record/Object/Audio_Record\")");
+onEvent("Epigraphic_record/Geography/Button_Location_Photo", "click", "attachPictureTo(\"Epigraphic_record/Geography/Location_Photo\")");
+onEvent("Epigraphic_record/Object/Button_Overview_Photo", "click", "attachPictureTo(\"Epigraphic_record/Object/Overview_Photo\")");
+onEvent("Epigraphic_record/Decoration/Button_Photo_Decoration", "click", "attachPictureTo(\"Epigraphic_record/Decoration/Photo_Decoration\")");
+onEvent("Epigraphic_record/Lettering/Button_Photo_Lettering", "click", "attachPictureTo(\"Epigraphic_record/Lettering/Photo_Lettering\")");
+onEvent("Epigraphic_record/Geography/Button_Location_Sketch", "click", "attachFileTo(\"Epigraphic_record/Geography/Location_Sketch\")");
+onEvent("Epigraphic_record/Decoration/Button_Sketch_Decoration", "click", "attachFileTo(\"Epigraphic_record/Decoration/Sketch_Decoration\")");
+onEvent("Epigraphic_record/Lettering/Button_Sketch_Lettering", "click", "attachFileTo(\"Epigraphic_record/Lettering/Sketch_Lettering\")");
+onEvent("Epigraphic_record/Object/Button_Video_Record", "click", "attachVideoTo(\"Epigraphic_record/Object/Video_Record\")");
+
+/******************************************************************************/
+/*                             NAVIGATION DRAWER                              */
+/******************************************************************************/
+removeNavigationButtons() {
+  removeNavigationButton("new");
+  removeNavigationButton("duplicate");
+  removeNavigationButton("delete");
+  removeNavigationButton("validate");
+}
+
+addNavigationButtons(String tabgroup) {
+  removeNavigationButtons();
+  List tabgroupsToValidate = new ArrayList();
+  tabgroupsToValidate.add("Epigraphic_record");
+  tabgroupsToValidate.add("External_Records");
+
+  addNavigationButton("new", new ActionButtonCallback() {
+    actionOnLabel() {
+      "{New}";
+    }
+    actionOn() {
+      if(!isNull(getUuid(tabgroup))) {
+          newRecord(tabgroup);
+          showToast("{New_record_created}");
+      } else {
+          showAlert("{Warning}", "{Any_unsaved_changes_will_be_lost}", "newRecord(\""+tabgroup+"\")", "");
+      }
+    }
+  }, "success");
+  addNavigationButton("duplicate", new ActionButtonCallback() {
+    actionOnLabel() {
+      "{Duplicate}";
+    }
+    actionOn() {
+      if(!isNull(getUuid(tabgroup))) {
+          duplicateRecord(tabgroup);
+      } else {
+          showWarning("{Warning}", "{This_record_is_unsaved_and_cannot_be_duplicated}");
+      }
+    }
+  }, "primary");
+  addNavigationButton("delete", new ActionButtonCallback() {
+    actionOnLabel() {
+      "{Delete}";
+    }
+    actionOn() {
+      deleteRecord(tabgroup);
+    }
+  }, "danger");
+  if (tabgroupsToValidate.contains(tabgroup)) {
+    addNavigationButton("validate", new ActionButtonCallback() {
+      actionOnLabel() {
+        "{Validate}";
+      }
+      actionOn() {
+        String validationFunction = "validate" + tabgroup.replaceAll("_", "") + "()";
+        eval(validationFunction);
+      }
+    }, "default");
+  }
+}
+
+/******************************************************************************/
+/*        ENTITY AND RELATIONSHIP SAVING AND LOADING HELPER FUNCTIONS         */
+/******************************************************************************/
+/** Saves two entity id's as a relation. **/
+saveEntitiesToRel(String type, String entity1, String entity2) {
+  String callback = null;
+  saveEntitiesToRel(type, entity1, entity2, callback);
+}
+
+/** Saves two entity id's as a relation with some callback executed. **/
+saveEntitiesToRel(String type, String entity1, String entity2, String callback) {
+  String e1verb = null;
+  String e2verb = null;
+  saveEntitiesToHierRel(type, entity1, entity2, e1verb, e2verb, callback);
+}
+
+/** Saves two entity id's as a hierachical relation with some callback executed. **/
+saveEntitiesToHierRel(String type, String entity1, String entity2, String e1verb, String e2verb, String callback) {
+  if (isNull(entity1) || isNull(entity2)) return;
+  saveRel(null, type, null, null, new SaveCallback() {
+    onSave(rel_id, newRecord) {
+      addReln(entity1, rel_id, e1verb);
+      addReln(entity2, rel_id, e2verb);
+      if(!isNull(callback)) {
+         execute(callback);
+      }
+    }
+    onError(message) {
+      Log.e("saveEntitiesToHierRel", message);
+      showToast(message);
+    }
+  });
+}
+
+// Makes a new record of the given tabgroup
+newRecord(String tabgroup) {
+  cancelTabGroup(tabgroup, false);
+
+  String newTabGroupFunction = "new" + tabgroup.replaceAll("_", "") + "()"; // Typical value: "newTabgroup()"
+  eval(newTabGroupFunction);
+
+  Log.d("newRecord", tabgroup);
+}
+
+// Deletes the current record of the given tabgroup
+deleteRecord(String tabgroup) {
+  String deleteTabGroupFunction = "delete" + tabgroup.replaceAll("_", "") + "()"; // Typical value: "deleteTabgroup()"
+  eval(deleteTabGroupFunction);
+
+  Log.d("deleteRecord", tabgroup);
+}
+
+// Duplicates the current record of the given tabgroup
+duplicateRecord(String tabgroup) {
+  dialog = showBusy("Duplicating", "Please wait...");
+
+  String duplicateTabGroupFunction = "duplicate" + tabgroup.replaceAll("_", "") + "()"; // Typical value: "duplicateTabgroup()"
+  eval(duplicateTabGroupFunction);
+
+  Log.d("duplicateRecord", tabgroup);
+}
+
+// generic fetch saved attributes query
+getDuplicateAttributeQuery(String originalRecordID, String attributesToDupe) {
+  if (attributesToDupe.equals("")) {
+    attributesToDupe = "''";
+  }
+  String duplicateQuery = "SELECT attributename, freetext, vocabid, measure, certainty " +
+                          "  FROM latestnondeletedaentvalue JOIN attributekey USING (attributeid) " +
+                          " WHERE attributename IN ('', "+attributesToDupe+") " +
+                          "   AND uuid = '"+originalRecordID+"'; ";
+  return duplicateQuery;
+}
+
+getDuplicateRelnQuery(String originalRecordID) {
+  String dupeRelnQuery = "SELECT relntypename, parentparticipatesverb, childparticipatesverb, parentuuid "+
+                         "  FROM parentchild join relationship using (relationshipid) "+
+                         "  JOIN relntype using (relntypeid) "+
+                         " WHERE childuuid = '"+originalRecordID+"' " +
+                         "   AND parentparticipatesverb = 'Parent Of' ";
+  return dupeRelnQuery;
+}
+
+makeDuplicateRelationships(fetchedAttributes, String newuuid){
+  Log.e("Module", "makeDuplicateRelationships");
+  for (savedAttribute : fetchedAttributes){
+    //  saveEntitiesToHierRel(relnname, parent, child, parentverb, childverb, relSaveCallback);
+    //relntypename, parentparticipatesverb, childparticipatesverb, childuuid
+    Log.e("Module", "in");
+    String relntypename           = savedAttribute.get(0);
+    String parentparticipatesverb = savedAttribute.get(1);
+    String childparticipatesverb  = savedAttribute.get(2);
+    String childuuid              = savedAttribute.get(3);
+    saveEntitiesToHierRel(relntypename, newuuid, childuuid, parentparticipatesverb, childparticipatesverb, null);
+  }
+}
+
+// generic get extra attributes
+getExtraAttributes(fetchedAttributes) {
+  List extraAttributes = createAttributeList();
+  Log.d("Module", "Duplicating fetched attributes: " + fetchedAttributes.toString());
+  for (savedAttribute : fetchedAttributes) {
+    extraAttributes.add(
+      createEntityAttribute(
+        savedAttribute.get(0),
+        savedAttribute.get(1),
+        savedAttribute.get(2),
+        savedAttribute.get(3),
+        savedAttribute.get(4)
+      )
+    );
+  }
+  return extraAttributes;
+}
+
+loadEntity() {
+  loadEntityFrom(getListItemValue());
+}
+
+loadEntityFrom(String entityID) {
+  if (isNull(entityID)) {
+    Log.e("Module", "Cannot load an entity with a null ID.");
+    return;
+  }
+
+  String getEntTypeNameQ = "SELECT aenttypename " +
+                           "  FROM latestnondeletedarchent " +
+                           "  JOIN aenttype " +
+                           " USING (aenttypeid) " +
+                           " WHERE uuid = '" + entityID + "'";
+  fetchAll(getEntTypeNameQ, new FetchCallback() {
+    onFetch(result) {
+      String archEntName = result.get(0).get(0);
+      String loadFunction = "load" + archEntName.replaceAll(" ", "") + "From(entityID)"; // Typical value: loadContextFrom(entityID)
+      eval(loadFunction);
+    }
+  });
+}
+
+newUser(){
+  String tabgroup = "User";
+
+
+  setUuid(tabgroup, null);
+  newTabGroup(tabgroup);
+
+}
+
+duplicateUser(){
+  String tabgroup = "User";
+  String uuidOld = getUuid(tabgroup);
+
+  disableAutoSave(tabgroup);
+
+
+
+
+  saveCallback = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+
+      Boolean enable_autosave = true;
+
+      fetchAll(getDuplicateRelnQuery(uuidOld), new FetchCallback(){
+        onFetch(result) {
+          Log.e("Module", result.toString());
+          makeDuplicateRelationships(result, getUuid(tabgroup));
+          showToast("{Duplicated_record}");
+          dialog.dismiss();
+        }
+      });
+
+      saveTabGroup(tabgroup, getUuid(tabgroup), null, null, new SaveCallback(){
+        onSave(autosaveUuid, autosaveNewRecord) {
+          setUuid(tabgroup, autosaveUuid);
+        }
+      }, enable_autosave);
+    }
+  };
+
+  String extraDupeAttributes = "";
+  fetchAll(getDuplicateAttributeQuery(getUuid(tabgroup), extraDupeAttributes), new FetchCallback(){
+    onFetch(result) {
+      excludeAttributes = new ArrayList();
+
+      duplicateTabGroup(tabgroup, null, getExtraAttributes(result), excludeAttributes, saveCallback);
+    }
+  });
+}
+
+deleteUser(){
+  String tabgroup = "User";
+
+  if (isNull(getUuid(tabgroup))) {
+    cancelTabGroup(tabgroup, true);
+  } else {
+    showAlert("{Confirm_Deletion}", "{Press_OK_to_Delete_this_Record}", "reallyDeleteUser()", "doNotDelete()");
+  }
+}
+
+reallyDeleteUser(){
+  String tabgroup = "User";
+  deleteArchEnt(getUuid(tabgroup));
+  cancelTabGroup(tabgroup, false);
+}
+
+newControl(){
+  String tabgroup = "Control";
+
+
+  setUuid(tabgroup, null);
+  newTabGroup(tabgroup);
+
+}
+
+duplicateControl(){
+  String tabgroup = "Control";
+  String uuidOld = getUuid(tabgroup);
+
+  disableAutoSave(tabgroup);
+
+
+
+
+  saveCallback = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+
+      Boolean enable_autosave = true;
+
+      fetchAll(getDuplicateRelnQuery(uuidOld), new FetchCallback(){
+        onFetch(result) {
+          Log.e("Module", result.toString());
+          makeDuplicateRelationships(result, getUuid(tabgroup));
+          showToast("{Duplicated_record}");
+          dialog.dismiss();
+        }
+      });
+
+      saveTabGroup(tabgroup, getUuid(tabgroup), null, null, new SaveCallback(){
+        onSave(autosaveUuid, autosaveNewRecord) {
+          setUuid(tabgroup, autosaveUuid);
+        }
+      }, enable_autosave);
+    }
+  };
+
+  String extraDupeAttributes = "";
+  fetchAll(getDuplicateAttributeQuery(getUuid(tabgroup), extraDupeAttributes), new FetchCallback(){
+    onFetch(result) {
+      excludeAttributes = new ArrayList();
+
+      duplicateTabGroup(tabgroup, null, getExtraAttributes(result), excludeAttributes, saveCallback);
+    }
+  });
+}
+
+deleteControl(){
+  String tabgroup = "Control";
+
+  if (isNull(getUuid(tabgroup))) {
+    cancelTabGroup(tabgroup, true);
+  } else {
+    showAlert("{Confirm_Deletion}", "{Press_OK_to_Delete_this_Record}", "reallyDeleteControl()", "doNotDelete()");
+  }
+}
+
+reallyDeleteControl(){
+  String tabgroup = "Control";
+  deleteArchEnt(getUuid(tabgroup));
+  cancelTabGroup(tabgroup, false);
+}
+
+newDiary(){
+  String tabgroup = "Diary";
+
+
+  setUuid(tabgroup, null);
+  newTabGroup(tabgroup);
+
+}
+
+duplicateDiary(){
+  String tabgroup = "Diary";
+  String uuidOld = getUuid(tabgroup);
+
+  disableAutoSave(tabgroup);
+
+
+
+
+  saveCallback = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+
+      Boolean enable_autosave = true;
+
+      fetchAll(getDuplicateRelnQuery(uuidOld), new FetchCallback(){
+        onFetch(result) {
+          Log.e("Module", result.toString());
+          makeDuplicateRelationships(result, getUuid(tabgroup));
+          showToast("{Duplicated_record}");
+          dialog.dismiss();
+        }
+      });
+
+      saveTabGroup(tabgroup, getUuid(tabgroup), null, null, new SaveCallback(){
+        onSave(autosaveUuid, autosaveNewRecord) {
+          setUuid(tabgroup, autosaveUuid);
+        }
+      }, enable_autosave);
+    }
+  };
+
+  String extraDupeAttributes = "";
+  fetchAll(getDuplicateAttributeQuery(getUuid(tabgroup), extraDupeAttributes), new FetchCallback(){
+    onFetch(result) {
+      excludeAttributes = new ArrayList();
+
+      duplicateTabGroup(tabgroup, null, getExtraAttributes(result), excludeAttributes, saveCallback);
+    }
+  });
+}
+
+deleteDiary(){
+  String tabgroup = "Diary";
+
+  if (isNull(getUuid(tabgroup))) {
+    cancelTabGroup(tabgroup, true);
+  } else {
+    showAlert("{Confirm_Deletion}", "{Press_OK_to_Delete_this_Record}", "reallyDeleteDiary()", "doNotDelete()");
+  }
+}
+
+reallyDeleteDiary(){
+  String tabgroup = "Diary";
+  deleteArchEnt(getUuid(tabgroup));
+  cancelTabGroup(tabgroup, false);
+}
+
+newEpigraphicrecord(){
+  String tabgroup = "Epigraphic_record";
+
+  String autoNumSource = "";
+  autoNumSource = getFieldValue("Control/Main/Next_Inscription_ID");
+  if (isNull(autoNumSource)) {
+    showWarning("{Alert}","{A_next_ID_has_not_been_entered_please_provide_one}");
+    return;
+  }
+
+  setUuid(tabgroup, null);
+  newTabGroup(tabgroup);
+
+  String autoNumDest = "";
+  autoNumDest = "Epigraphic_record/Admin/Inscription_ID";
+  incAutoNum(autoNumDest);
+}
+
+duplicateEpigraphicrecord(){
+  String tabgroup = "Epigraphic_record";
+  String uuidOld = getUuid(tabgroup);
+
+  disableAutoSave(tabgroup);
+
+  String autoNumDest = "";
+  autoNumDest = "Epigraphic_record/Admin/Inscription_ID";
+  incAutoNum(autoNumDest);
+
+  populateCameraPictureGallery("Epigraphic_record/Geography/Location_Photo", new ArrayList());
+  populateFileList("Epigraphic_record/Geography/Location_Sketch", new ArrayList());
+  populateCameraPictureGallery("Epigraphic_record/Object/Overview_Photo", new ArrayList());
+  populateFileList("Epigraphic_record/Object/Audio_Record", new ArrayList());
+  populateVideoGallery("Epigraphic_record/Object/Video_Record", new ArrayList());
+  populateCameraPictureGallery("Epigraphic_record/Decoration/Photo_Decoration", new ArrayList());
+  populateFileList("Epigraphic_record/Decoration/Sketch_Decoration", new ArrayList());
+  populateCameraPictureGallery("Epigraphic_record/Lettering/Photo_Lettering", new ArrayList());
+  populateFileList("Epigraphic_record/Lettering/Sketch_Lettering", new ArrayList());
+
+
+  saveCallback = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+
+      Boolean enable_autosave = true;
+
+      fetchAll(getDuplicateRelnQuery(uuidOld), new FetchCallback(){
+        onFetch(result) {
+          Log.e("Module", result.toString());
+          makeDuplicateRelationships(result, getUuid(tabgroup));
+          showToast("{Duplicated_record}");
+          dialog.dismiss();
+        }
+      });
+
+      saveTabGroup(tabgroup, getUuid(tabgroup), null, null, new SaveCallback(){
+        onSave(autosaveUuid, autosaveNewRecord) {
+          setUuid(tabgroup, autosaveUuid);
+        }
+      }, enable_autosave);
+    }
+  };
+
+  String extraDupeAttributes = "";
+  fetchAll(getDuplicateAttributeQuery(getUuid(tabgroup), extraDupeAttributes), new FetchCallback(){
+    onFetch(result) {
+      excludeAttributes = new ArrayList();
+      excludeAttributes.add("Location Photo");
+      excludeAttributes.add("Location Sketch");
+      excludeAttributes.add("Overview Photo");
+      excludeAttributes.add("Audio Record");
+      excludeAttributes.add("Video Record");
+      excludeAttributes.add("Photo Decoration");
+      excludeAttributes.add("Sketch Decoration");
+      excludeAttributes.add("Photo Lettering");
+      excludeAttributes.add("Sketch Lettering");
+
+      duplicateTabGroup(tabgroup, null, getExtraAttributes(result), excludeAttributes, saveCallback);
+    }
+  });
+}
+
+deleteEpigraphicrecord(){
+  String tabgroup = "Epigraphic_record";
+
+  if (isNull(getUuid(tabgroup))) {
+    cancelTabGroup(tabgroup, true);
+  } else {
+    showAlert("{Confirm_Deletion}", "{Press_OK_to_Delete_this_Record}", "reallyDeleteEpigraphicrecord()", "doNotDelete()");
+  }
+}
+
+reallyDeleteEpigraphicrecord(){
+  String tabgroup = "Epigraphic_record";
+  deleteArchEnt(getUuid(tabgroup));
+  cancelTabGroup(tabgroup, false);
+}
+
+newExternalRecords(){
+  String tabgroup = "External_Records";
+
+
+  setUuid(tabgroup, null);
+  newTabGroup(tabgroup);
+
+}
+
+duplicateExternalRecords(){
+  String tabgroup = "External_Records";
+  String uuidOld = getUuid(tabgroup);
+
+  disableAutoSave(tabgroup);
+
+
+
+
+  saveCallback = new SaveCallback() {
+    onSave(uuid, newRecord) {
+      setUuid(tabgroup, uuid);
+      populateAuthorAndTimestamp(tabgroup);
+
+      Boolean enable_autosave = true;
+
+      fetchAll(getDuplicateRelnQuery(uuidOld), new FetchCallback(){
+        onFetch(result) {
+          Log.e("Module", result.toString());
+          makeDuplicateRelationships(result, getUuid(tabgroup));
+          showToast("{Duplicated_record}");
+          dialog.dismiss();
+        }
+      });
+
+      saveTabGroup(tabgroup, getUuid(tabgroup), null, null, new SaveCallback(){
+        onSave(autosaveUuid, autosaveNewRecord) {
+          setUuid(tabgroup, autosaveUuid);
+        }
+      }, enable_autosave);
+    }
+  };
+
+  String extraDupeAttributes = "";
+  fetchAll(getDuplicateAttributeQuery(getUuid(tabgroup), extraDupeAttributes), new FetchCallback(){
+    onFetch(result) {
+      excludeAttributes = new ArrayList();
+
+      duplicateTabGroup(tabgroup, null, getExtraAttributes(result), excludeAttributes, saveCallback);
+    }
+  });
+}
+
+deleteExternalRecords(){
+  String tabgroup = "External_Records";
+
+  if (isNull(getUuid(tabgroup))) {
+    cancelTabGroup(tabgroup, true);
+  } else {
+    showAlert("{Confirm_Deletion}", "{Press_OK_to_Delete_this_Record}", "reallyDeleteExternalRecords()", "doNotDelete()");
+  }
+}
+
+reallyDeleteExternalRecords(){
+  String tabgroup = "External_Records";
+  deleteArchEnt(getUuid(tabgroup));
+  cancelTabGroup(tabgroup, false);
+}
+
+
+doNotDelete(){
+  showToast("{Delete_Cancelled}");
+}
+onEvent("User", "show", "addNavigationButtons(\"User\")");
+onEvent("Control", "show", "addNavigationButtons(\"Control\")");
+onEvent("Diary", "show", "addNavigationButtons(\"Diary\")");
+onEvent("Epigraphic_record", "show", "addNavigationButtons(\"Epigraphic_record\")");
+onEvent("External_Records", "show", "addNavigationButtons(\"External_Records\")");
+
+/******************************************************************************/
+/*                                   SEARCH                                   */
+/******************************************************************************/
+onEvent("Control/Search"               , "show"  , "search();");
+onEvent("Control/Search/Entity_List"   , "click" , "loadEntity();");
+onEvent("Control/Search/Search_Button" , "click" , "search()");
+onEvent("Control/Search/Search_Term"   , "click" , "clearSearch()");
+onEvent("Control/Search/Entity_Types"  , "click" , "search()");
+
+entityTypes = new ArrayList();
+entityTypes.add(new NameValuePair("{All}", ""));
+entityTypes.add(new NameValuePair("{User}", "User"));
+entityTypes.add(new NameValuePair("{Control}", "Control"));
+entityTypes.add(new NameValuePair("{Diary}", "Diary"));
+entityTypes.add(new NameValuePair("{Epigraphic_record}", "Epigraphic record"));
+entityTypes.add(new NameValuePair("{External_Records}", "External Records"));
+populateDropDown("Control/Search/Entity_Types", entityTypes);
+
+clearSearch(){
+  setFieldValue("Control/Search/Search_Term","");
+}
+
+search(){
+  String tabgroup = "Control";
+  String refEntityList  = tabgroup + "/Search/Entity_List";
+  String refSearchTerm  = tabgroup + "/Search/Search_Term";
+  String refEntityTypes = tabgroup + "/Search/Entity_Types";
+
+  String type = getFieldValue(refEntityTypes);
+  String term = getFieldValue(refSearchTerm);
+  String searchQuery = "SELECT uuid, response "+
+                       "  FROM latestNonDeletedArchEntFormattedIdentifiers  "+
+                       " WHERE uuid in (SELECT uuid "+
+                       "                  FROM latestNonDeletedArchEntIdentifiers "+
+                       "                 WHERE measure LIKE '"+term+"'||'%'  "+
+                       "                   AND ( aenttypename LIKE '"+type+"' OR '' = '"+type+"' ) "+
+                       "                )  "+
+                       " ORDER BY response "+
+                       " LIMIT ? "+
+                       "OFFSET ? ";
+
+  populateCursorList(refEntityList, searchQuery, 25);
+  refreshTabgroupCSS(tabgroup);
+
+  Log.d("Module", "Search query: " + searchQuery);
+}
+
+loadUserFrom(String uuid) {
+  String tabgroup = "User";
+  setUuid(tabgroup, uuid);
+  if (isNull(uuid)) return;
+
+  showTabGroup(tabgroup, uuid);
+}
+
+loadControlFrom(String uuid) {
+  String tabgroup = "Control";
+  setUuid(tabgroup, uuid);
+  if (isNull(uuid)) return;
+
+  showTabGroup(tabgroup, uuid);
+}
+
+loadDiaryFrom(String uuid) {
+  String tabgroup = "Diary";
+  setUuid(tabgroup, uuid);
+  if (isNull(uuid)) return;
+
+  showTabGroup(tabgroup, uuid);
+}
+
+loadEpigraphicrecordFrom(String uuid) {
+  String tabgroup = "Epigraphic_record";
+  setUuid(tabgroup, uuid);
+  if (isNull(uuid)) return;
+
+  showTabGroup(tabgroup, uuid);
+}
+
+loadExternalRecordsFrom(String uuid) {
+  String tabgroup = "External_Records";
+  setUuid(tabgroup, uuid);
+  if (isNull(uuid)) return;
+
+  showTabGroup(tabgroup, uuid);
+}
+
+
+/******************************************************************************/
+/*                          TAKE FROM GPS BUTTON(S)                           */
+/******************************************************************************/
+onEvent("Epigraphic_record/Geography/Take_From_GPS", "click", "takePoint(\"Epigraphic_record\")");
+
+/* Takes the current point using gps. */
+takePoint(String tabgroup) {
+  String archEntType = tabgroup.replaceAll("_", " ");
+  String currentUuid = getUuid(tabgroup);
+  if (isNull(currentUuid)){
+    showToast("Please enter data first and let a save occur.");
+  }
+
+  Object position = getGPSPosition();
+  if (position == null) {
+    showToast("{GPS_Not_Initialised}");
+    return;
+  }
+
+  Object projPosition = getGPSPositionProjected();
+  Double latitude     = position.getLatitude();
+  Double longitude    = position.getLongitude();
+  Double northing     = projPosition.getLatitude();
+  Double easting      = projPosition.getLongitude();
+
+  samplePoint = new Point(new MapPos(easting, northing), null, (PointStyle) null, null);
+  ArrayList geolist = new ArrayList();
+  geolist.add(samplePoint);
+
+  attributes = createAttributeList();
+  attributes.add(createEntityAttribute("Latitude", "Accuracy: "+getGPSEstimatedAccuracy(), null, null, null));
+
+  saveArchEnt(currentUuid, archEntType, geolist, attributes, new SaveCallback() {
+    onSave(uuid, newRecord) {
+      print("[takePoint()] Added geometry: " + geolist);
+      fillInGPS(tabgroup);
+    }
+  });
+}
+
+/* Sets the value of GPS views for the given tab path. */
+fillInGPS(String tabgroup) {
+  Map tabgroupToTabRef = new HashMap();
+  tabgroupToTabRef.put("Epigraphic_record", "Epigraphic_record/Geography/");
+
+  String currentUuid = getUuid(tabgroup);
+  if (isNull(currentUuid)) {
+    return;
+  }
+
+  String query = "SELECT x(transform(geospatialcolumn,                4326)) as longtiude, " +
+                 "       y(transform(geospatialcolumn,                4326)) as latitude, " +
+                 "       x(transform(geospatialcolumn, "+getModuleSrid()+")) as easting, " +
+                 "       y(transform(geospatialcolumn, "+getModuleSrid()+")) as northing " +
+                 "  FROM latestnondeletedarchent, vocabulary " +
+                 " WHERE uuid = '" + currentUuid + "';";
+
+  fetchOne(query, new FetchCallback() {
+    onFetch(result) {
+      print("[fillInGPS()] Fetched DB transformed geometry: " + result);
+      setFieldValue(tabgroupToTabRef.get(tabgroup) + "Longitude" , result.get(0));
+      setFieldValue(tabgroupToTabRef.get(tabgroup) + "Latitude"  , result.get(1));
+      setFieldValue(tabgroupToTabRef.get(tabgroup) + "Easting"   , result.get(2));
+      setFieldValue(tabgroupToTabRef.get(tabgroup) + "Northing"  , result.get(3));
+    }
+  });
+}
+
+/******************************************************************************/
+/*                       AUTONUMBERING HELPER FUNCTIONS                       */
+/******************************************************************************/
+insertIntoLocalSettings(String key, String val) {
+    fetchOne("REPLACE INTO localSettings(key, value) VALUES('" + key + "', '" + val + "');");
+}
+
+insertIntoLocalSettings(String key, Integer val) {
+    insertIntoLocalSettings(key, Integer.toString(val));
+}
+
+/*
+ * If value of field specified by `ref` is null, sets the field to `defaultVal`,
+ * otherwise increments its value.
+ *
+ * Returns the value the field was updated to.
+ */
+incField(String ref, Integer defaultVal) {
+  String val = getFieldValue(ref);
+
+  if (isNull(val)) {
+    setFieldValue(ref, defaultVal);
+    return defaultVal;
+  }
+
+  Integer inc = Integer.parseInt(val) + 1;
+  setFieldValue(ref, inc);
+  insertIntoLocalSettings(ref, inc.toString());
+
+  return inc;
+}
+
+/* Increments the field at `ref` or returns null if it does not contain a
+ * number.
+ */
+incField(String ref) {
+  return incField(ref, 1);
+}
+
+onEvent("Control", "load", "onLoadControl()");
+
+/* This function should only be called once since it creates event handlers,
+ * otherwise multiple copies of the same handler will trigger with the event.
+ */
+onLoadControl() {
+  List l = new ArrayList();
+  l.add("Control/Main/Next_Inscription_ID");
+
+
+  for (ref : l) {
+    loadStartingId(ref);
+  }
+  for (ref : l) {
+    onFocus(ref, null,  "insertIntoLocalSettings(\"" + ref + "\", getFieldValue(\"" + ref + "\"));");
+  }
+}
+
+loadStartingId(String ref) {
+  String idQ = "SELECT value FROM localSettings WHERE key = '" + ref + "';";
+  fetchOne(idQ, new FetchCallback() {
+    onFetch(result) {
+      if (!isNull(result)) {
+        setFieldValue(ref, result.get(0));
+      } else {
+        setFieldValue(ref, "1");
+      }
+    }
+  });
+}
+
+incAutoNum(String destPath) {
+  Map destToSource = new HashMap();
+  destToSource.put("Epigraphic_record/Admin/Inscription_ID", "Control/Main/Next_Inscription_ID");
+
+  String sourcePath = destToSource.get(destPath);
+  String destVal    = getFieldValue(sourcePath);
+  setFieldValue(destPath, destVal);
+  incField(sourcePath);
+}
