@@ -37,3 +37,28 @@ This module is part of the **FAIMS Demo library** on our publicly accessible Dem
 For more details about the **Hellenization of Ancient Thrace** see Petra's Academia.edu profile at https://cuni.academia.edu/PetraJanouchova, or contact her at petra.janouchova@gmail.com
 
 If you have any questions about the module, please contact the FAIMS team at **enquiries@fedarch.org** and we will get back to you within one business day.
+
+## Screenshots:
+
+<p align="left">
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-113953.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114007.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114225.png" width="250"/>
+</p>
+
+<p align="left">
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114309.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114332.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114352.png" width="250"/>
+</p>
+
+<p align="left">
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114401.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114534.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114606.png" width="250"/>
+</p>
+
+<p align="left">
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114630.png" width="250"/>
+  <img src="https://github.com/petrajanouchova/Epigraphic_Module/blob/master/screenshots/Screenshot_20170912-114839.png" width="250"/>
+</p>
